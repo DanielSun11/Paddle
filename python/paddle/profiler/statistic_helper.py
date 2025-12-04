@@ -228,3 +228,101 @@ def subtract_ranges(range_list1, range_list2, is_sorted=False):
             if index1 != len1:
                 range1 = range_list1[index1]
     return result_range
+
+
+class DistributeGPUTimeCollector:
+    op_gpu_time = {}
+    gathered_op_gpu_time = {}
+    need_collect = False
+
+    @classmethod
+    def enable_collect(cls):
+        cls.need_collect = True
+
+    @classmethod
+    def disable_collect(cls):
+        cls.need_collect = False
+
+    @classmethod
+    def add_into_gpu_times(cls, op_name, call, gpu_time):
+        if op_name not in cls.op_gpu_time:
+            cls.op_gpu_time[op_name] = [0, 0]
+        cls.op_gpu_time[op_name][0] += call
+        cls.op_gpu_time[op_name][1] += gpu_time
+
+    @classmethod
+    def try_collect(cls, items):
+        if not cls.need_collect:
+            return
+
+        for key in items.keys():
+            op_item = items[key]
+            # Remove the  duplicated statistic op in pylayer backward
+            if "GradNodePyLayer" in key or "GradNodeAccumulation" in key:
+                for (
+                    innerop_name,
+                    innerop_node,
+                ) in op_item.operator_inners.items():
+                    if "pybind_imperative_func" in innerop_name:
+                        op_item.cpu_time = (
+                            op_item.cpu_time - innerop_node.cpu_time
+                        )
+                        op_item.general_gpu_time = (
+                            op_item.general_gpu_time
+                            - innerop_node.general_gpu_time
+                        )
+                    elif innerop_node.general_gpu_time > 0:
+                        cls.add_into_gpu_times(
+                            innerop_name,
+                            innerop_node.call,
+                            innerop_node.general_gpu_time,
+                        )
+                for name, device_node in op_item.devices.items():
+                    cls.add_into_gpu_times(
+                        device_node.name, device_node.call, device_node.gpu_time
+                    )
+            elif op_item.general_gpu_time > 0:
+                cls.add_into_gpu_times(
+                    key, op_item.call, op_item.general_gpu_time
+                )
+        print(cls.op_gpu_time)
+
+    @classmethod
+    def aggregate_from_distribute_workers(cls):
+        import paddle.distributed as dist
+
+        group = dist.collective._get_global_group()
+        all_workers_gpu_time = []
+        dist.all_gather_object(all_workers_gpu_time, cls.op_gpu_time)
+
+        def aggregate_gpu_time(all_workers_gpu_time):
+            aggregated_gpu_time = {}
+            for d in all_workers_gpu_time:
+                for key, values in d.items():
+                    if key not in aggregated_gpu_time:
+                        aggregated_gpu_time[key] = [0] * len(values)
+                    aggregated_gpu_time[key] = [
+                        sum_val + val
+                        for sum_val, val in zip(
+                            aggregated_gpu_time[key], values
+                        )
+                    ]
+            return aggregated_gpu_time
+
+        cls.gathered_op_gpu_time = aggregate_gpu_time(all_workers_gpu_time)
+
+    @classmethod
+    def show_result(cls):
+        sorted_by_value_desc = dict(
+            sorted(
+                cls.gathered_op_gpu_time.items(),
+                key=lambda item: item[1][1],
+                reverse=True,
+            )
+        )
+        for op_name, item in sorted_by_value_desc.items():
+            time = float(item[1]) / 1000000
+            max_length = 50
+            print(
+                f"{op_name if len(op_name) <= max_length else op_name[: max_length - 3] + '...'} |{item[0]} |{time:.3f}"
+            )

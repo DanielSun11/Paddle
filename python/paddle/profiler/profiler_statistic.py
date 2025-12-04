@@ -1318,6 +1318,38 @@ def _build_table(
                 }
             for thread_id, items in thread_items.items():
                 all_row_values.append(f"Thread: {thread_id}")
+
+                def op_items_filter(items):
+                    gpu_times = {}
+                    for key in items.keys():
+                        op_item = items[key]
+                        # Remove the  duplicated statistic op in pylayer backward
+                        if (
+                            "GradNodePyLayer" in key
+                            or "GradNodeAccumulation" in key
+                        ):
+                            for (
+                                innerop_name,
+                                innerop_node,
+                            ) in op_item.operator_inners.items():
+                                if "pybind_imperative_func" in innerop_name:
+                                    op_item.cpu_time = (
+                                        op_item.cpu_time - innerop_node.cpu_time
+                                    )
+                                    op_item.general_gpu_time = (
+                                        op_item.general_gpu_time
+                                        - innerop_node.general_gpu_time
+                                    )
+                                    op_item.operator_inners[
+                                        innerop_name
+                                    ].name = "*" + innerop_name
+                            items[key] = op_item
+                        gpu_times[key] = [
+                            op_item.call,
+                            op_item.general_gpu_time,
+                        ]
+
+                # op_items_filter(items)
                 if sorted_by == SortedKeys.CPUTotal:
                     sorted_items = sorted(
                         items.items(), key=lambda x: x[1].cpu_time, reverse=True
@@ -1416,6 +1448,7 @@ def _build_table(
                                     float(innerop_node.general_gpu_time)
                                     / item.general_gpu_time
                                 )
+                            innerop_name = innerop_node.name
                             if len(innerop_name) + 2 > name_column_width:
                                 innerop_name = innerop_name[
                                     : name_column_width - 5
