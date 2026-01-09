@@ -204,6 +204,7 @@ class TestFusedMoePermuteUnpermute(unittest.TestCase):
                     zipped_expertwise_rowmap._md5sum(),
                     err_msg="no_gather's zipped_expertwise_rowmap do not match",
                 )
+
                 np.testing.assert_equal(
                     unzipped_probs_no_gather._md5sum(),
                     unzipped_probs._md5sum(),
