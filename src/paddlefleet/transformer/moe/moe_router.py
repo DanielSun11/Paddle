@@ -241,21 +241,31 @@ class StandardMoERouter(nn.Layer):
 
         return capacity
 
-    def _cal_aux_loss(self, gates, mask):
+    def _cal_aux_loss(self, gates, mask, input_ids=None):
         """
         Calculate auxiliary loss
 
         Args:
             gates (paddle.Tensor): Represents the output probability of each expert. The shape is [batch_size, num_experts]
             mask (paddle.Tensor): Represents whether each sample belongs to a certain expert. The shape is [batch_size, num_experts]
+            input_ids (paddle.Tensor, optional): Input token ids used to compute valid token mask.
 
         Returns:
             paddle.Tensor: The value of auxiliary loss.
 
         """
         # TODO: @DrownFish19 update aux_loss for Qwen2MoE and DeepSeekV2&V3
-        me = paddle.mean(gates, axis=0)
-        ce = paddle.mean(mask.cast("float32"), axis=0)
+        if input_ids is not None:
+            assert input_ids.shape[0] == gates.shape[0], f"check input_ids shape {input_ids.shape}"
+            valid_mask = (input_ids != 0).astype(paddle.float32).reshape([-1])
+            seqlen_float = valid_mask.sum().item()
+            gates = gates * valid_mask.unsqueeze(-1)
+        else:
+            seqlen_float = float(gates.shape[0])
+        if seqlen_float == 0:
+            return paddle.to_tensor(0.0)
+        me = paddle.sum(gates, axis=0) / seqlen_float
+        ce = paddle.sum(mask.cast("float32"), axis=0) / seqlen_float
         aux_loss = paddle.sum(me * ce) * float(self.num_experts)
         return aux_loss
 
@@ -360,17 +370,30 @@ class StandardMoERouter(nn.Layer):
             )
         return seq_aux_loss
 
-    def _cal_z_loss(self, logits) -> paddle.Tensor:
+    def _cal_z_loss(self, logits, input_ids=None) -> paddle.Tensor:
         """
         Calculate the z loss.
 
         Args:
             logits (paddle.Tensor): Model output. The shape is [batch_size, num_experts].
+            input_ids (paddle.Tensor, optional): Input token ids used to compute loss mask.
 
         Returns:
             paddle.Tensor: The z loss value.
         """
-        l_zloss = paddle.logsumexp(logits, axis=1).square().mean()
+        if input_ids is not None:
+            origin_loss_mask = (input_ids != 0).astype(paddle.float32)
+            loss_mask = origin_loss_mask.reshape([-1])
+            if getattr(self.config, "gpt_model_use_experimental_version", False):
+                # Align to EC, which also consider mtp token
+                denom = origin_loss_mask.sum() +  origin_loss_mask.shape[0] * self.config.num_nextn_predict_layers
+            else:
+                denom = origin_loss_mask.sum()
+
+            l_zloss = (logits.logsumexp(1).square() * loss_mask).sum() / paddle.clip(denom, min=1e-6)
+        else:
+            l_zloss = paddle.logsumexp(logits, axis=1).square().mean()
+
         return l_zloss
 
     def _priority(
@@ -753,7 +776,7 @@ class TopKRouter(StandardMoERouter):
 
         # z-loss
         if self.config.router_z_loss_coef:
-            l_zloss = self._cal_z_loss(logits) * self.config.router_z_loss_coef
+            l_zloss = self._cal_z_loss(logits,input_ids) * self.config.router_z_loss_coef
         else:
             l_zloss = None
 
@@ -811,7 +834,7 @@ class TopKRouter(StandardMoERouter):
                 )
 
             else:
-                l_aux = self._cal_aux_loss(gates, mask)
+                l_aux = self._cal_aux_loss(gates, mask, input_ids=input_ids)
         else:
             l_aux = None
 
