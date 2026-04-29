@@ -256,7 +256,9 @@ class StandardMoERouter(nn.Layer):
         """
         # TODO: @DrownFish19 update aux_loss for Qwen2MoE and DeepSeekV2&V3
         if input_ids is not None:
-            assert input_ids.shape[0] == gates.shape[0], f"check input_ids shape {input_ids.shape}"
+            assert input_ids.shape[0] == gates.shape[0], (
+                f"check input_ids shape {input_ids.shape}"
+            )
             valid_mask = (input_ids != 0).astype(paddle.float32).reshape([-1])
             seqlen_float = valid_mask.sum().item()
             gates = gates * valid_mask.unsqueeze(-1)
@@ -384,13 +386,21 @@ class StandardMoERouter(nn.Layer):
         if input_ids is not None:
             origin_loss_mask = (input_ids != 0).astype(paddle.float32)
             loss_mask = origin_loss_mask.reshape([-1])
-            if getattr(self.config, "gpt_model_use_experimental_version", False):
+            if getattr(
+                self.config, "gpt_model_use_experimental_version", False
+            ):
                 # Align to EC, which also consider mtp token
-                denom = origin_loss_mask.sum() +  origin_loss_mask.shape[0] * self.config.num_nextn_predict_layers
+                denom = (
+                    origin_loss_mask.sum()
+                    + origin_loss_mask.shape[0]
+                    * self.config.num_nextn_predict_layers
+                )
             else:
                 denom = origin_loss_mask.sum()
 
-            l_zloss = (logits.logsumexp(1).square() * loss_mask).sum() / paddle.clip(denom, min=1e-6)
+            l_zloss = (
+                logits.logsumexp(1).square() * loss_mask
+            ).sum() / paddle.clip(denom, min=1e-6)
         else:
             l_zloss = paddle.logsumexp(logits, axis=1).square().mean()
 
@@ -776,7 +786,10 @@ class TopKRouter(StandardMoERouter):
 
         # z-loss
         if self.config.router_z_loss_coef:
-            l_zloss = self._cal_z_loss(logits,input_ids) * self.config.router_z_loss_coef
+            l_zloss = (
+                self._cal_z_loss(logits, input_ids)
+                * self.config.router_z_loss_coef
+            )
         else:
             l_zloss = None
 
