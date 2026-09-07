@@ -415,6 +415,15 @@ class TestMatmulStrideOffset(StrideFlagTestCase):
 
     OFFSET = 1024
 
+    def setUp(self):
+        super().setUp()
+        # cuBLAS rejects a plain bfloat16 gemm below compute capability 80, so
+        # older cards exercise the fold in float16 instead. Both are two bytes
+        # wide, which keeps the offset alignment argument above valid, and the
+        # fold itself only rewrites meta, so it cannot depend on the dtype.
+        major, minor = paddle.device.cuda.get_device_capability()
+        self.dtype = "bfloat16" if (major, minor) >= (8, 0) else "float16"
+
     def _pair(self, shape, dtype, seed):
         """The same values, once as an offset view and once as a tensor."""
         n = _numel(shape)
@@ -439,8 +448,8 @@ class TestMatmulStrideOffset(StrideFlagTestCase):
 
     def test_y_operand_folded(self):
         """matmul(x, w.t()): the transposed view is the second operand."""
-        x = paddle.randn([512, 2048], dtype="float32").astype("bfloat16")
-        u = paddle.randn([256, 1024], dtype="float32").astype("bfloat16")
+        x = paddle.randn([512, 2048], dtype="float32").astype(self.dtype)
+        u = paddle.randn([256, 1024], dtype="float32").astype(self.dtype)
         for name, fn in [
             ("wt", lambda w: paddle.matmul(x, w.t())),
             ("wt_ty", lambda w: paddle.matmul(u, w.t(), transpose_y=True)),
@@ -448,25 +457,25 @@ class TestMatmulStrideOffset(StrideFlagTestCase):
             ("w_plain", lambda w: paddle.matmul(u, w)),
         ]:
             with self.subTest(case=name):
-                self._same(fn, [1024, 2048], "bfloat16", 8600)
+                self._same(fn, [1024, 2048], self.dtype, 8600)
 
     def test_x_operand_folded(self):
         """matmul(w.t(), z): the transposed view is the first operand."""
-        z = paddle.randn([1024, 256], dtype="float32").astype("bfloat16")
-        u = paddle.randn([256, 1024], dtype="float32").astype("bfloat16")
+        z = paddle.randn([1024, 256], dtype="float32").astype(self.dtype)
+        u = paddle.randn([256, 1024], dtype="float32").astype(self.dtype)
         for name, fn in [
             ("wt_z", lambda w: paddle.matmul(w.t(), z)),
             ("wt_ut", lambda w: paddle.matmul(w.t(), u, transpose_y=True)),
             ("w_tx", lambda w: paddle.matmul(w, z, transpose_x=True)),
         ]:
             with self.subTest(case=name):
-                self._same(fn, [1024, 2048], "bfloat16", 8700)
+                self._same(fn, [1024, 2048], self.dtype, 8700)
 
     def test_both_operands_folded(self):
         """Both operands are offset views of the same buffer."""
         n = 1024 * 512
-        vals = _host_values(2 * n + self.OFFSET, "bfloat16", 8800)
-        buf = paddle.to_tensor(vals, dtype="bfloat16")
+        vals = _host_values(2 * n + self.OFFSET, self.dtype, 8800)
+        buf = paddle.to_tensor(vals, dtype=self.dtype)
         a = buf[self.OFFSET : self.OFFSET + n].reshape([512, 1024])
         b = buf[self.OFFSET + n : self.OFFSET + 2 * n].reshape([512, 1024])
         got = paddle.matmul(a.t(), b)
@@ -477,8 +486,8 @@ class TestMatmulStrideOffset(StrideFlagTestCase):
 
     def test_batched(self):
         """3-D operands, both a trailing swap and a permutation that is not."""
-        g = paddle.randn([4, 256, 512], dtype="float32").astype("bfloat16")
-        h = paddle.randn([64, 32, 4], dtype="float32").astype("bfloat16")
+        g = paddle.randn([4, 256, 512], dtype="float32").astype(self.dtype)
+        h = paddle.randn([64, 32, 4], dtype="float32").astype(self.dtype)
         for name, shape, fn in [
             (
                 "swap_last2",
@@ -499,7 +508,7 @@ class TestMatmulStrideOffset(StrideFlagTestCase):
             ),
         ]:
             with self.subTest(case=name):
-                self._same(fn, shape, "bfloat16", 8900)
+                self._same(fn, shape, self.dtype, 8900)
 
     def test_dtypes(self):
         """The fold is dtype independent."""
